@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Philco PID</title>
+    <!-- Include Chart.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #f4f4f9; --card-color: #ffffff; --text-main: #333;
+            --accent-brew: #d32f2f; --accent-safe: #388e3c; --accent-wait: #f57c00;
+            --chart-temp: #ff5722; --chart-set: #2196f3;
+        }
+        body { font-family: -apple-system, system-ui, sans-serif; background-color: var(--bg-color); color: var(--text-main); margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; box-sizing: border-box; height: 100vh;}
+        
+        /* Header & Connect Button */
+        header { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 10px 0; margin-bottom: 10px; }
+        h1 { font-size: 1.2rem; margin: 0; font-weight: 700; }
+        
+        #connectBtn { padding: 8px 15px; font-size: 0.9rem; font-weight: 600; border-radius: 20px; border: none; cursor: pointer; background-color: #555; color: white; transition: background 0.3s;}
+        #connectBtn.connected { background-color: var(--accent-safe); }
+        #connectBtn.reconnecting { background-color: var(--accent-wait); animation: pulse 1.5s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+
+        /* General Card Styling */
+        .card { background: var(--card-color); border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); width: 100%; max-width: 400px; padding: 15px; margin-bottom: 15px; box-sizing: border-box; }
+
+        /* Chart Section (Top) */
+        .chart-container { flex: 1 1 45%; min-height: 250px; position: relative; }
+        
+        /* Controls Section (Bottom) */
+        .controls-container { flex: 0 0 auto; display: flex; flex-direction: column; gap: 15px; }
+        
+        .readout-row { display: flex; justify-content: space-around; text-align: center; margin-bottom: 5px; }
+        .readout-item .label { font-size: 0.8rem; color: #666; text-transform: uppercase; letter-spacing: 1px;}
+        .readout-item .value { font-size: 2.2rem; font-weight: 800; }
+        .readout-item.boiler .value { color: var(--chart-temp); }
+        .readout-item.target .value { color: var(--chart-set); }
+
+        /* Slider and Send Interface */
+        .slider-section { display: flex; flex-direction: column; align-items: center; gap: 15px; width: 100%; }
+        .slider-label-row { display: flex; justify-content: space-between; width: 100%; padding: 0 5px; color: #777; font-size: 0.9rem; font-weight: bold;}
+        
+        .temp-slider { -webkit-appearance: none; width: 100%; height: 15px; border-radius: 10px; background: #ddd; outline: none; margin: 10px 0; }
+        .temp-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 28px; height: 28px; border-radius: 50%; background: var(--chart-set); cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        
+        .send-btn { width: 100%; border: none; border-radius: 8px; padding: 15px; font-size: 1.2rem; font-weight: 700; color: white; background-color: var(--accent-brew); cursor: pointer; text-align: center; transition: transform 0.1s, opacity 0.2s;}
+        .send-btn:active { transform: scale(0.97); opacity: 0.9; }
+        .send-btn:disabled { background-color: #ccc; cursor: not-allowed; transform: none;}
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Philco PID</h1>
+    <button id="connectBtn" onclick="initialPairing()">CONNECT</button>
+</header>
+
+<!-- Chart Card (Top Area) -->
+<div class="card chart-container">
+    <canvas id="tempChart"></canvas>
+</div>
+
+<!-- Controls Card (Bottom Area) -->
+<div class="card controls-container">
+    <div class="readout-row">
+        <div class="readout-item boiler">
+            <div class="label">Boiler</div>
+            <div class="value"><span id="readoutBoiler">--</span>°C</div>
+        </div>
+        <div class="readout-item target">
+            <div class="label">Target</div>
+            <div class="value"><span id="readoutTarget">--</span>°C</div>
+        </div>
+    </div>
+
+    <div class="slider-section">
+        <div class="slider-label-row">
+            <span>80.0°C</span>
+            <span style="color: var(--chart-set); font-size: 1.1rem;">Selected: <span id="sliderVal">90.0</span>°C</span>
+            <span>95.0°C</span>
+        </div>
+        
+        <input type="range" id="tempSlider" class="temp-slider" min="80.0" max="95.0" step="0.5" value="90.0" oninput="updateSliderLabel(this.value)">
+        
+        <button class="send-btn" id="sendBtn" onclick="sendTargetFromSlider()" disabled>SEND SETPOINT</button>
+    </div>
+</div>
+
+<script>
+    // --- Configuration (Existing UUIDs) ---
+    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331915d";
+    const BOILER_CHAR_UUID  = "beb5483e-36e1-4688-b7f5-ea07361b26ab"; 
+    const TARGET_CHAR_UUID  = "beb5483e-36e1-4688-b7f5-ea07361b26ac"; 
+
+    // --- State Variables ---
+    let bleDevice = null;
+    let bleService = null;
+    let targetTemperature = 90.0; 
+
+    // --- UI References ---
+    const connectBtn = document.getElementById('connectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const readoutBoiler = document.getElementById('readoutBoiler');
+    const readoutTarget = document.getElementById('readoutTarget');
+    const tempSlider = document.getElementById('tempSlider');
+    const sliderVal = document.getElementById('sliderVal');
+
+    function updateSliderLabel(val) {
+        sliderVal.innerText = parseFloat(val).toFixed(1);
+    }
+
+    // ==========================================
+    // =         Chart.js Implementation        =
+    // ==========================================
+    const ctx = document.getElementById('tempChart').getContext('2d');
+    const MAX_DATA_POINTS = 60; 
+    
+    const tempChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [], 
+            datasets: [
+                {
+                    label: 'Boiler Actual',
+                    data: [],
+                    borderColor: '#ff5722', 
+                    backgroundColor: 'rgba(255, 87, 34, 0.1)',
+                    borderWidth: 3,
+                    pointRadius: 0, 
+                    tension: 0.3, 
+                    fill: true
+                },
+                {
+                    label: 'Target Setpoint',
+                    data: [],
+                    borderColor: '#2196f3', 
+                    borderWidth: 2,
+                    borderDash: [5, 5], 
+                    pointRadius: 0,
+                    tension: 0, 
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false, 
+            plugins: { legend: { display: false } }, 
+            scales: {
+                x: { display: false }, 
+                y: {
+                    position: 'right',
+                    min: 75, max: 100,
+                    ticks: { callback: (value) => value + '°C', stepSize: 5, color: '#999' },
+                    grid: { color: 'rgba(0,0,0,0.05)' }
+                }
+            }
+        }
+    });
+
+    function addDataToChart(boilerTemp) {
+        const now = new Date().toLocaleTimeString();
+        tempChart.data.labels.push(now);
+        tempChart.data.datasets[0].data.push(boilerTemp);
+        tempChart.data.datasets[1].data.push(targetTemperature);
+
+        if (tempChart.data.labels.length > MAX_DATA_POINTS) {
+            tempChart.data.labels.shift();
+            tempChart.data.datasets[0].data.shift();
+            tempChart.data.datasets[1].data.shift();
+        }
+        tempChart.update('none'); 
+    }
+
+    // ==========================================
+    // =      Web Bluetooth API Logic           =
+    // ==========================================
+
+    // Automatically check for paired devices when the page loads
+    window.addEventListener('DOMContentLoaded', async () => {
+        if ('bluetooth' in navigator && 'getDevices' in navigator.bluetooth) {
+            try {
+                const devices = await navigator.bluetooth.getDevices();
+                const espressoDevice = devices.find(d => d.name === "espresso-controller");
+                if (espressoDevice) {
+                    console.log("Found previously paired device. Auto-connecting...");
+                    connectToDevice(espressoDevice);
+                }
+            } catch (err) {
+                console.log("Auto-connect unavailable. Waiting for manual pairing.");
+            }
+        }
+    });
+
+    // Manual pairing for the very first time you use the dashboard
+    async function initialPairing() {
+        if (bleService) return;
+        try {
+            connectBtn.innerText = "PAIRING...";
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [{ name: "espresso-controller" }],
+                optionalServices: [SERVICE_UUID]
+            });
+            connectToDevice(device);
+        } catch (error) {
+            console.error(error);
+            connectBtn.innerText = "CONNECT";
+        }
+    }
+
+    // The actual connection logic (used by both Manual and Auto routes)
+    async function connectToDevice(device) {
+        bleDevice = device;
+        
+        // Listen for sudden drops so we can reconnect automatically
+        bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+        try {
+            connectBtn.innerText = "CONNECTING...";
+            connectBtn.classList.remove('reconnecting');
+            
+            const gattServer = await bleDevice.gatt.connect();
+            bleService = await gattServer.getPrimaryService(SERVICE_UUID);
+            
+            // Connection Successful
+            connectBtn.innerText = "CONNECTED";
+            connectBtn.classList.add('connected');
+            connectBtn.disabled = true;
+            sendBtn.disabled = false; // Enable the send button
+
+            // 1. Setup Boiler Notifications
+            const boilerChar = await bleService.getCharacteristic(BOILER_CHAR_UUID);
+            await boilerChar.startNotifications();
+            boilerChar.addEventListener('characteristicvaluechanged', handleBoilerUpdate);
+            
+            // Read initial state instantly
+            const initialView = await boilerChar.readValue();
+            handleBoilerUpdate({ target: { value: initialView } });
+
+            // 2. Fetch Initial Target from ESP32
+            const targetChar = await bleService.getCharacteristic(TARGET_CHAR_UUID);
+            const initialTargetView = await targetChar.readValue();
+            handleTargetRead(initialTargetView);
+
+        } catch (error) {
+            console.error("Connection attempt failed.", error);
+            onDisconnected(); // Force into the reconnect loop if we failed to connect
+        }
+    }
+
+    // Fired when the machine turns off, walks out of range, or connection drops
+    function onDisconnected() {
+        console.log("Device disconnected. Attempting to reconnect in 3s...");
+        bleService = null;
+        sendBtn.disabled = true;
+        
+        connectBtn.innerText = "RECONNECTING...";
+        connectBtn.classList.remove('connected');
+        connectBtn.classList.add('reconnecting');
+        
+        // Try to connect again after 3 seconds
+        setTimeout(() => {
+            if (bleDevice && !bleDevice.gatt.connected) {
+                connectToDevice(bleDevice);
+            }
+        }, 3000);
+    }
+
+    function handleBoilerUpdate(event) {
+        const dataView = event.target.value;
+        const temp = dataView.getFloat32(0, true); 
+        readoutBoiler.innerText = temp.toFixed(1);
+        addDataToChart(temp);
+    }
+
+    function handleTargetRead(dataView) {
+        const temp = dataView.getFloat32(0, true);
+        targetTemperature = temp;
+        readoutTarget.innerText = temp.toFixed(1);
+        tempSlider.value = temp;
+        updateSliderLabel(temp);
+    }
+
+    async function sendTargetFromSlider() {
+        if (!bleService) return;
+        
+        const newTarget = parseFloat(tempSlider.value);
+        
+        try {
+            const buffer = new ArrayBuffer(4);
+            const dataView = new DataView(buffer);
+            dataView.setFloat32(0, newTarget, true); 
+
+            const targetChar = await bleService.getCharacteristic(TARGET_CHAR_UUID);
+            await targetChar.writeValue(buffer);
+            
+            targetTemperature = newTarget;
+            readoutTarget.innerText = newTarget.toFixed(1);
+            console.log("Sent target via BLE:", newTarget);
+            
+        } catch (error) {
+            console.error(error);
+            alert("Failed to send setpoint.");
+        }
+    }
+</script>
+</body>
+</html>

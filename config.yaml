@@ -1,0 +1,207 @@
+esphome:
+  name: espresso-controller
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: arduino
+
+#Standard ESPHome Network Setup
+wifi:
+  ssid: "CLARO_AFAC5D"
+  password: "CTkyH#H9y4"
+
+web_server:
+  port: 80
+  auth:
+    username: admin
+    password: "quimicaruim32"
+    
+api:
+ota:
+  - platform: web_server
+logger:
+    
+# 1. Base ESP32 BLE Component (Required)
+esp32_ble:
+
+# 2. Setup SPI for MAX31855
+spi:
+  clk_pin: GPIO6
+  miso_pin: GPIO4
+
+# 3. Read Boiler Temperature
+sensor:
+  - platform: max31855
+    name: "Boiler Temperature"
+    id: boiler_temp
+    cs_pin: GPIO7
+    update_interval: 0.5s
+    on_value:
+      then:
+        # Pushes updates directly to your phone when the temp changes
+        - ble_server.characteristic.notify: 
+            id: char_boiler_temp
+  - platform: pid
+    name: "PID Error"
+    type: ERROR
+  - platform: pid
+    name: "PID Power"
+    type: HEAT
+  - platform: pid
+    name: "PID Kp"
+    type: KP
+  - platform: pid
+    name: "PID Ki"
+    type: KI
+  - platform: pid
+    name: "PID Kd"
+    type: KD
+
+# 4. Control the SSR
+output:
+  - platform: slow_pwm
+    pin: GPIO10
+    id: ssr_pwm
+    period: 1s 
+
+# 5. The PID Engine
+climate:
+  - platform: pid
+    name: "Espresso PID"
+    id: espresso_pid
+    sensor: boiler_temp
+    default_target_temperature: 95.0 
+    heat_output: ssr_pwm
+    control_parameters:
+      kp: 0.5  
+      ki: 0.01 
+      kd: 0.1  
+
+button:
+  - platform: template
+    name: "PID Autotune"
+    on_press:
+      - climate.pid.autotune: espresso_pid
+# 6. Sliders/Inputs for UI Mapping
+number:
+  - platform: template
+    name: "Target Temperature"
+    id: ble_target_temp
+    initial_value: 90.0
+    min_value: 70.0
+    max_value: 110.0
+    step: 0.5
+    optimistic: true
+    on_value:
+      then:
+        - climate.control:
+            id: espresso_pid
+            target_temperature: !lambda "return x;"
+
+  - platform: template
+    name: "PID Kp Modifier"
+    id: ble_kp
+    initial_value: 0.5
+    min_value: 0.0
+    max_value: 10.0
+    step: 0.01
+    optimistic: true
+    on_value:
+      then:
+        - lambda: "id(espresso_pid).set_kp(x);"
+
+  - platform: template
+    name: "PID Ki Modifier"
+    id: ble_ki
+    initial_value: 0.01
+    min_value: 0.0
+    max_value: 1.0
+    step: 0.001
+    optimistic: true
+    on_value:
+      then:
+        - lambda: "id(espresso_pid).set_ki(x);"
+
+# 7. Native BLE GATT Server
+esp32_ble_server:
+  services:
+    - uuid: "4fafc201-1fb5-459e-8fcc-c5c9c331915d"
+      characteristics:
+        # Current Temp (Read / Notify)
+        - uuid: "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+          id: char_boiler_temp
+          read: true
+          notify: true
+          value:
+            data: !lambda |-
+              float val = id(boiler_temp).state;
+              uint8_t* p = (uint8_t*)&val;
+              return std::vector<uint8_t>(p, p + sizeof(float));
+              
+        # Target Temp (Read / Write)
+        - uuid: "beb5483e-36e1-4688-b7f5-ea07361b26ac"
+          id: char_target_temp
+          read: true
+          write: true
+          value:
+            data: !lambda |-
+              float val = id(ble_target_temp).state;
+              uint8_t* p = (uint8_t*)&val;
+              return std::vector<uint8_t>(p, p + sizeof(float));
+          on_write:
+            then:
+              - lambda: |-
+                  if (x.size() == sizeof(float)) {
+                    float val;
+                    memcpy(&val, x.data(), sizeof(float));
+                    ESP_LOGI("BLE", "Received new Target Temp: %.1f", val);
+                    auto call = id(ble_target_temp).make_call();
+                    call.set_value(val);
+                    call.perform();
+                  }
+
+        # Kp Modifier (Read / Write)
+        - uuid: "beb5483e-36e1-4688-b7f5-ea07361b26ad"
+          id: char_kp
+          read: true
+          write: true
+          value:
+            data: !lambda |-
+              float val = id(ble_kp).state;
+              uint8_t* p = (uint8_t*)&val;
+              return std::vector<uint8_t>(p, p + sizeof(float));
+          on_write:
+            then:
+              - lambda: |-
+                  if (x.size() == sizeof(float)) {
+                    float val;
+                    memcpy(&val, x.data(), sizeof(float));
+                    ESP_LOGI("BLE", "Received new Kp: %.3f", val);
+                    auto call = id(ble_kp).make_call();
+                    call.set_value(val);
+                    call.perform();
+                  }
+
+        # Ki Modifier (Read / Write)
+        - uuid: "beb5483e-36e1-4688-b7f5-ea07361b26ae"
+          id: char_ki
+          read: true
+          write: true
+          value:
+            data: !lambda |-
+              float val = id(ble_ki).state;
+              uint8_t* p = (uint8_t*)&val;
+              return std::vector<uint8_t>(p, p + sizeof(float));
+          on_write:
+            then:
+              - lambda: |-
+                  if (x.size() == sizeof(float)) {
+                    float val;
+                    memcpy(&val, x.data(), sizeof(float));
+                    ESP_LOGI("BLE", "Received new Ki: %.3f", val);
+                    auto call = id(ble_ki).make_call();
+                    call.set_value(val);
+                    call.perform();
+                  }
