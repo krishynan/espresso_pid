@@ -17,6 +17,7 @@ web_server:
   auth:
     username: admin
     password: "quimicaruim32"
+    type: digest
     
 api:
 ota:
@@ -37,7 +38,9 @@ sensor:
     name: "Boiler Temperature"
     id: boiler_temp
     cs_pin: GPIO7
-    update_interval: 0.5s
+    update_interval: 1s
+    filters:
+      - offset: -5.0
     on_value:
       then:
         # Pushes updates directly to your phone when the temp changes
@@ -52,12 +55,18 @@ sensor:
   - platform: pid
     name: "PID Kp"
     type: KP
+    unit_of_measurement: ""
+    accuracy_decimals: 3
   - platform: pid
     name: "PID Ki"
     type: KI
+    unit_of_measurement: ""
+    accuracy_decimals: 4
   - platform: pid
     name: "PID Kd"
     type: KD
+    unit_of_measurement: ""
+    accuracy_decimals: 2
 
 # 4. Control the SSR
 output:
@@ -72,24 +81,35 @@ climate:
     name: "Espresso PID"
     id: espresso_pid
     sensor: boiler_temp
-    default_target_temperature: 95.0 
+    default_target_temperature: 93.0 
     heat_output: ssr_pwm
     control_parameters:
-      kp: 0.5  
-      ki: 0.01 
-      kd: 0.1  
+      kp: 0.3  
+      ki: 0.001 
+      kd: 0.5
+      derivative_averaging_samples: 5
+    deadband_parameters:
+      threshold_high: 3°C       # deadband within +/-5°C of target_temperature
+      threshold_low: -3°C
+      kp_multiplier: 0.1   # proportional gain turned off inside deadband
+      kd_multiplier: 0.0   # derivative is turned off inside deadband
+    
 
 button:
   - platform: template
     name: "PID Autotune"
     on_press:
-      - climate.pid.autotune: espresso_pid
+      - climate.pid.autotune:
+          id: espresso_pid
+          noiseband: 0.5
+          positive_output: 2%
+
 # 6. Sliders/Inputs for UI Mapping
 number:
   - platform: template
     name: "Target Temperature"
     id: ble_target_temp
-    initial_value: 90.0
+    initial_value: 93.0
     min_value: 70.0
     max_value: 110.0
     step: 0.5
@@ -103,10 +123,10 @@ number:
   - platform: template
     name: "PID Kp Modifier"
     id: ble_kp
-    initial_value: 0.5
-    min_value: 0.0
-    max_value: 10.0
-    step: 0.01
+    initial_value: 0.3
+    min_value: 0.02
+    max_value: 0.05
+    step: 0.001
     optimistic: true
     on_value:
       then:
@@ -115,14 +135,26 @@ number:
   - platform: template
     name: "PID Ki Modifier"
     id: ble_ki
-    initial_value: 0.01
-    min_value: 0.0
-    max_value: 1.0
-    step: 0.001
+    initial_value: 0.001
+    min_value: 0
+    max_value: 0.5
+    step: 0.01
     optimistic: true
     on_value:
       then:
         - lambda: "id(espresso_pid).set_ki(x);"
+        
+  - platform: template
+    name: "PID Kd Modifier"
+    id: ble_kd
+    initial_value: 0.5
+    min_value: 0
+    max_value: 1
+    step: 0.05
+    optimistic: true
+    on_value:
+      then:
+        - lambda: "id(espresso_pid).set_kd(x);"
 
 # 7. Native BLE GATT Server
 esp32_ble_server:

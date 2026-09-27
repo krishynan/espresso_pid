@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Philco PID</title>
+    <title>Philco BLE Dashboard</title>
     <!-- Include Chart.js from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --bg-color: #f4f4f9; --card-color: #ffffff; --text-main: #333;
             --accent-brew: #d32f2f; --accent-safe: #388e3c; --accent-wait: #f57c00;
-            --chart-temp: #ff5722; --chart-set: #2196f3;
+            --chart-temp: #ff5722; --chart-set: #2196f3; --chart-ma: #4caf50;
         }
         body { font-family: -apple-system, system-ui, sans-serif; background-color: var(--bg-color); color: var(--text-main); margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; box-sizing: border-box; height: 100vh;}
         
@@ -28,8 +28,15 @@
         .card { background: var(--card-color); border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); width: 100%; max-width: 400px; padding: 15px; margin-bottom: 15px; box-sizing: border-box; }
 
         /* Chart Section (Top) */
-        .chart-container { flex: 1 1 45%; min-height: 250px; position: relative; }
+        .chart-container { flex: 1 1 45%; min-height: 250px; position: relative; display: flex; flex-direction: column;}
+        .chart-wrapper { flex: 1; position: relative; min-height: 0; }
         
+        /* Chart Controls */
+        .chart-controls { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; font-size: 0.8rem; }
+        .chart-controls select { padding: 4px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.8rem; background: #fff; }
+        .control-group { display: flex; flex-direction: column; width: 48%; }
+        .control-group label { margin-bottom: 3px; color: #666; font-weight: bold; }
+
         /* Controls Section (Bottom) */
         .controls-container { flex: 0 0 auto; display: flex; flex-direction: column; gap: 15px; }
         
@@ -54,13 +61,38 @@
 <body>
 
 <header>
-    <h1>Philco PID</h1>
+    <h1>Philco PID Krishynan</h1>
     <button id="connectBtn" onclick="initialPairing()">CONNECT</button>
 </header>
 
 <!-- Chart Card (Top Area) -->
 <div class="card chart-container">
-    <canvas id="tempChart"></canvas>
+    <div class="chart-wrapper">
+        <canvas id="tempChart"></canvas>
+    </div>
+    
+    <!-- New Chart Settings -->
+    <div class="chart-controls">
+        <div class="control-group">
+            <label for="timeWindowSelect">Histórico (Pontos)</label>
+            <select id="timeWindowSelect" onchange="updateChartSettings()">
+                <option value="60">60 Pontos</option>
+                <option value="120">120 Pontos</option>
+                <option value="300">300 Pontos</option>
+                <option value="600">600 Pontos</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="maWindowSelect">Média Móvel</label>
+            <select id="maWindowSelect" onchange="updateChartSettings()">
+                <option value="0">Desligado</option>
+                <option value="5">5 Pontos</option>
+                <option value="10" selected>10 Pontos</option>
+                <option value="20">20 Pontos</option>
+                <option value="50">50 Pontos</option>
+            </select>
+        </div>
+    </div>
 </div>
 
 <!-- Controls Card (Bottom Area) -->
@@ -78,12 +110,12 @@
 
     <div class="slider-section">
         <div class="slider-label-row">
-            <span>80.0°C</span>
+            <span>70.0°C</span>
             <span style="color: var(--chart-set); font-size: 1.1rem;">Selected: <span id="sliderVal">90.0</span>°C</span>
-            <span>95.0°C</span>
+            <span>110.0°C</span>
         </div>
         
-        <input type="range" id="tempSlider" class="temp-slider" min="80.0" max="95.0" step="0.5" value="90.0" oninput="updateSliderLabel(this.value)">
+        <input type="range" id="tempSlider" class="temp-slider" min="70.0" max="110.0" step="0.5" value="90.0" oninput="updateSliderLabel(this.value)">
         
         <button class="send-btn" id="sendBtn" onclick="sendTargetFromSlider()" disabled>SEND SETPOINT</button>
     </div>
@@ -98,7 +130,15 @@
     // --- State Variables ---
     let bleDevice = null;
     let bleService = null;
+    let bleTargetChar = null; 
+    let targetPollInterval = null;
+    
     let targetTemperature = 90.0; 
+    let sliderIsBeingDragged = false; 
+
+    // Chart Control Variables
+    let maxDataPoints = 60;
+    let maWindowSize = 0; // 0 = disabled
 
     // --- UI References ---
     const connectBtn = document.getElementById('connectBtn');
@@ -111,12 +151,30 @@
     function updateSliderLabel(val) {
         sliderVal.innerText = parseFloat(val).toFixed(1);
     }
+    
+    tempSlider.addEventListener('mousedown', () => sliderIsBeingDragged = true);
+    tempSlider.addEventListener('touchstart', () => sliderIsBeingDragged = true);
+    tempSlider.addEventListener('mouseup', () => sliderIsBeingDragged = false);
+    tempSlider.addEventListener('touchend', () => sliderIsBeingDragged = false);
+
+    function updateChartSettings() {
+        maxDataPoints = parseInt(document.getElementById('timeWindowSelect').value);
+        maWindowSize = parseInt(document.getElementById('maWindowSelect').value);
+        
+        // Trim data immediately if user reduced the window size
+        while (tempChart.data.labels.length > maxDataPoints) {
+            tempChart.data.labels.shift();
+            tempChart.data.datasets[0].data.shift();
+            tempChart.data.datasets[1].data.shift();
+            tempChart.data.datasets[2].data.shift();
+        }
+        tempChart.update('none');
+    }
 
     // ==========================================
     // =         Chart.js Implementation        =
     // ==========================================
     const ctx = document.getElementById('tempChart').getContext('2d');
-    const MAX_DATA_POINTS = 60; 
     
     const tempChart = new Chart(ctx, {
         type: 'line',
@@ -142,6 +200,15 @@
                     pointRadius: 0,
                     tension: 0, 
                     fill: false
+                },
+                {
+                    label: 'Média Móvel',
+                    data: [],
+                    borderColor: '#4caf50', // Green for MA
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.3,
+                    fill: false
                 }
             ]
         },
@@ -154,8 +221,7 @@
                 x: { display: false }, 
                 y: {
                     position: 'right',
-                    min: 75, max: 100,
-                    ticks: { callback: (value) => value + '°C', stepSize: 5, color: '#999' },
+                    ticks: { callback: (value) => value + '°C', color: '#999' },
                     grid: { color: 'rgba(0,0,0,0.05)' }
                 }
             }
@@ -164,39 +230,70 @@
 
     function addDataToChart(boilerTemp) {
         const now = new Date().toLocaleTimeString();
+        
+        // Convert NaN to null so Chart.js doesn't break
+        const safeTemp = isNaN(boilerTemp) ? null : boilerTemp;
+
         tempChart.data.labels.push(now);
-        tempChart.data.datasets[0].data.push(boilerTemp);
+        tempChart.data.datasets[0].data.push(safeTemp);
         tempChart.data.datasets[1].data.push(targetTemperature);
 
-        if (tempChart.data.labels.length > MAX_DATA_POINTS) {
+        // Calculate Moving Average (Ignoring NaN/null)
+        let maValue = null;
+        if (maWindowSize > 0 && tempChart.data.datasets[0].data.length > 0) {
+            const rawData = tempChart.data.datasets[0].data;
+            
+            // Get the recent slice, but filter out any null or NaN values
+            const validSlice = rawData.slice(-maWindowSize).filter(val => val !== null && !isNaN(val));
+            
+            // Only calculate if we have at least one valid number
+            if (validSlice.length > 0) {
+                const sum = validSlice.reduce((a, b) => a + b, 0);
+                maValue = sum / validSlice.length; // Divide by the count of *valid* points
+            }
+        }
+        tempChart.data.datasets[2].data.push(maValue);
+
+        // Keep rolling window at max length
+        if (tempChart.data.labels.length > maxDataPoints) {
             tempChart.data.labels.shift();
             tempChart.data.datasets[0].data.shift();
             tempChart.data.datasets[1].data.shift();
+            tempChart.data.datasets[2].data.shift();
         }
+        
+        // --- DYNAMIC Y-AXIS CALCULATION ---
+        const allVisibleData = [
+            ...tempChart.data.datasets[0].data.filter(v => v !== null), 
+            ...tempChart.data.datasets[1].data.filter(v => v !== null),
+            ...tempChart.data.datasets[2].data.filter(v => v !== null)
+        ];
+        
+        if (allVisibleData.length > 0) {
+            const currentMin = Math.min(...allVisibleData);
+            const currentMax = Math.max(...allVisibleData);
+            tempChart.options.scales.y.min = Math.floor(currentMin - 1);
+            tempChart.options.scales.y.max = Math.ceil(currentMax + 1);
+        }
+
         tempChart.update('none'); 
     }
 
     // ==========================================
     // =      Web Bluetooth API Logic           =
     // ==========================================
-
-    // Automatically check for paired devices when the page loads
     window.addEventListener('DOMContentLoaded', async () => {
         if ('bluetooth' in navigator && 'getDevices' in navigator.bluetooth) {
             try {
                 const devices = await navigator.bluetooth.getDevices();
                 const espressoDevice = devices.find(d => d.name === "espresso-controller");
-                if (espressoDevice) {
-                    console.log("Found previously paired device. Auto-connecting...");
-                    connectToDevice(espressoDevice);
-                }
+                if (espressoDevice) connectToDevice(espressoDevice);
             } catch (err) {
-                console.log("Auto-connect unavailable. Waiting for manual pairing.");
+                console.log("Auto-connect unavailable.");
             }
         }
     });
 
-    // Manual pairing for the very first time you use the dashboard
     async function initialPairing() {
         if (bleService) return;
         try {
@@ -212,11 +309,8 @@
         }
     }
 
-    // The actual connection logic (used by both Manual and Auto routes)
     async function connectToDevice(device) {
         bleDevice = device;
-        
-        // Listen for sudden drops so we can reconnect automatically
         bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
 
         try {
@@ -226,67 +320,80 @@
             const gattServer = await bleDevice.gatt.connect();
             bleService = await gattServer.getPrimaryService(SERVICE_UUID);
             
-            // Connection Successful
             connectBtn.innerText = "CONNECTED";
             connectBtn.classList.add('connected');
             connectBtn.disabled = true;
-            sendBtn.disabled = false; // Enable the send button
+            sendBtn.disabled = false; 
 
             // 1. Setup Boiler Notifications
             const boilerChar = await bleService.getCharacteristic(BOILER_CHAR_UUID);
             await boilerChar.startNotifications();
             boilerChar.addEventListener('characteristicvaluechanged', handleBoilerUpdate);
             
-            // Read initial state instantly
             const initialView = await boilerChar.readValue();
             handleBoilerUpdate({ target: { value: initialView } });
 
-            // 2. Fetch Initial Target from ESP32
-            const targetChar = await bleService.getCharacteristic(TARGET_CHAR_UUID);
-            const initialTargetView = await targetChar.readValue();
+            // 2. Fetch Target and setup background polling
+            bleTargetChar = await bleService.getCharacteristic(TARGET_CHAR_UUID);
+            const initialTargetView = await bleTargetChar.readValue();
             handleTargetRead(initialTargetView);
+            
+            if (targetPollInterval) clearInterval(targetPollInterval);
+            targetPollInterval = setInterval(pollTargetTemperature, 3000);
 
         } catch (error) {
             console.error("Connection attempt failed.", error);
-            onDisconnected(); // Force into the reconnect loop if we failed to connect
+            onDisconnected(); 
         }
     }
 
-    // Fired when the machine turns off, walks out of range, or connection drops
     function onDisconnected() {
         console.log("Device disconnected. Attempting to reconnect in 3s...");
         bleService = null;
+        bleTargetChar = null;
         sendBtn.disabled = true;
+        
+        if (targetPollInterval) clearInterval(targetPollInterval);
         
         connectBtn.innerText = "RECONNECTING...";
         connectBtn.classList.remove('connected');
         connectBtn.classList.add('reconnecting');
         
-        // Try to connect again after 3 seconds
         setTimeout(() => {
-            if (bleDevice && !bleDevice.gatt.connected) {
-                connectToDevice(bleDevice);
-            }
+            if (bleDevice && !bleDevice.gatt.connected) connectToDevice(bleDevice);
         }, 3000);
     }
 
     function handleBoilerUpdate(event) {
-        const dataView = event.target.value;
-        const temp = dataView.getFloat32(0, true); 
+        const temp = event.target.value.getFloat32(0, true); 
         readoutBoiler.innerText = temp.toFixed(1);
         addDataToChart(temp);
+    }
+
+    async function pollTargetTemperature() {
+        if (!bleTargetChar || !bleDevice || !bleDevice.gatt.connected) return;
+        try {
+            const dataView = await bleTargetChar.readValue();
+            handleTargetRead(dataView);
+        } catch (error) {
+            console.log("Skipped poll cycle (GATT busy)");
+        }
     }
 
     function handleTargetRead(dataView) {
         const temp = dataView.getFloat32(0, true);
         targetTemperature = temp;
         readoutTarget.innerText = temp.toFixed(1);
-        tempSlider.value = temp;
-        updateSliderLabel(temp);
+        
+        if (!sliderIsBeingDragged) {
+            const clampedTemp = Math.min(Math.max(temp, 70.0), 110.0);
+            tempSlider.value = clampedTemp;
+            updateSliderLabel(temp);
+        }
     }
 
     async function sendTargetFromSlider() {
-        if (!bleService) return;
+        if (!bleService || !bleTargetChar) return;
         
         const newTarget = parseFloat(tempSlider.value);
         
@@ -295,8 +402,7 @@
             const dataView = new DataView(buffer);
             dataView.setFloat32(0, newTarget, true); 
 
-            const targetChar = await bleService.getCharacteristic(TARGET_CHAR_UUID);
-            await targetChar.writeValue(buffer);
+            await bleTargetChar.writeValue(buffer);
             
             targetTemperature = newTarget;
             readoutTarget.innerText = newTarget.toFixed(1);
